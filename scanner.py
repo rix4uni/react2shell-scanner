@@ -10,7 +10,7 @@ import argparse
 import sys
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse
 from typing import Optional
@@ -130,7 +130,7 @@ def check_vulnerability(host: str, timeout: int = 10, verify_ssl: bool = True, f
         "request": None,
         "response": None,
         "final_url": None,
-        "timestamp": datetime.utcnow().isoformat() + "Z"
+        "timestamp": datetime.now(timezone.utc).isoformat() + "Z"
     }
 
     host = normalize_host(host)
@@ -232,7 +232,7 @@ def save_results(results: list[dict], output_file: str, vulnerable_only: bool = 
         results = [r for r in results if r.get("vulnerable") is True]
 
     output = {
-        "scan_time": datetime.utcnow().isoformat() + "Z",
+        "scan_time": datetime.now(timezone.utc).isoformat() + "Z",
         "total_results": len(results),
         "results": results
     }
