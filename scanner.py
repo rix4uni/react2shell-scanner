@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.9"
+# dependencies = [
+#     "requests>=2.28.0",
+#     "tqdm>=4.64.0",
+# ]
+# ///
 """
 React2Shell Scanner - High Fidelity Detection for RSC/Next.js RCE
 CVE-2025-55182 & CVE-2025-66478
