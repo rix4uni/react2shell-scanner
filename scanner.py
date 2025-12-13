@@ -439,6 +439,9 @@ def load_hosts(hosts_file: str) -> list[str]:
             for line in f:
                 host = line.strip()
                 if host and not host.startswith("#"):
+                    # Remove *. from the start of the line
+                    if host.startswith("*."):
+                        host = host[2:]
                     hosts.append(host)
     except FileNotFoundError:
         print(colorize(f"[ERROR] File not found: {hosts_file}", Colors.RED))
@@ -470,6 +473,66 @@ def load_paths(paths_file: str) -> list[str]:
     return paths
 
 
+def get_resume_file_path(hosts_file: str) -> str:
+    """Generate resume file path from hosts file path."""
+    if not hosts_file:
+        return ""
+    return f"{hosts_file}.resume"
+
+
+def load_scanned_hosts(resume_file: str) -> set[str]:
+    """Load already-scanned hosts from resume file."""
+    scanned_hosts = set()
+    if not resume_file or not os.path.exists(resume_file):
+        return scanned_hosts
+    
+    try:
+        with open(resume_file, "r") as f:
+            for line in f:
+                host = line.strip()
+                if host:
+                    # Normalize the host before adding to set
+                    normalized = normalize_host(host)
+                    if normalized:
+                        scanned_hosts.add(normalized)
+    except Exception as e:
+        # Silently handle errors - if we can't read resume file, just start fresh
+        pass
+    
+    return scanned_hosts
+
+
+def save_scanned_host(resume_file: str, host: str):
+    """Append a scanned host to the resume file."""
+    if not resume_file:
+        return
+    
+    try:
+        # Normalize host before saving
+        normalized = normalize_host(host)
+        if not normalized:
+            return
+        
+        with open(resume_file, "a") as f:
+            f.write(f"{normalized}\n")
+    except Exception:
+        # Silently handle errors - resume is a convenience feature
+        pass
+
+
+def delete_resume_file(resume_file: str):
+    """Delete the resume file if it exists."""
+    if not resume_file:
+        return
+    
+    try:
+        if os.path.exists(resume_file):
+            os.remove(resume_file)
+    except Exception:
+        # Silently handle errors
+        pass
+
+
 def save_results(results: list[dict], output_file: str, vulnerable_only: bool = True):
     if vulnerable_only:
         results = [r for r in results if r.get("vulnerable") is True]
@@ -486,6 +549,96 @@ def save_results(results: list[dict], output_file: str, vulnerable_only: bool = 
         print(colorize(f"\n[+] Results saved to: {output_file}", Colors.GREEN))
     except Exception as e:
         print(colorize(f"\n[ERROR] Failed to save results: {e}", Colors.RED))
+
+
+def save_unique_urls(results: list[dict], output_file: str, vulnerable_only: bool = True):
+    """Save unique final_url values to a file, one per line. Appends to existing file."""
+    if vulnerable_only:
+        results = [r for r in results if r.get("vulnerable") is True]
+
+    # Extract final_url values that are not None and remove trailing slashes
+    new_urls = set()
+    for r in results:
+        final_url = r.get("final_url")
+        if final_url:
+            # Remove trailing slash
+            final_url = final_url.rstrip("/")
+            new_urls.add(final_url)
+
+    if not new_urls:
+        return
+
+    # Read existing URLs from file (if it exists) and remove trailing slashes
+    existing_urls = set()
+    if os.path.exists(output_file):
+        try:
+            with open(output_file, "r") as f:
+                for line in f:
+                    url = line.strip()
+                    if url:
+                        # Remove trailing slash
+                        url = url.rstrip("/")
+                        existing_urls.add(url)
+        except Exception as e:
+            print(colorize(f"\n[WARNING] Failed to read existing URLs from {output_file}: {e}", Colors.YELLOW))
+
+    # Merge existing and new URLs, remove duplicates
+    all_urls = existing_urls | new_urls
+    new_count = len(all_urls) - len(existing_urls)
+
+    # Write all unique URLs back to file
+    try:
+        with open(output_file, "w") as f:
+            for url in sorted(all_urls):
+                f.write(f"{url}\n")
+        if new_count > 0:
+            print(colorize(f"\n[+] Added {new_count} new unique URL(s) to: {output_file}", Colors.GREEN))
+        else:
+            print(colorize(f"\n[+] No new URLs to add (all {len(new_urls)} URL(s) already exist in: {output_file})", Colors.CYAN))
+    except Exception as e:
+        print(colorize(f"\n[ERROR] Failed to save unique URLs: {e}", Colors.RED))
+
+
+def save_unique_url_incremental(output_file: str, final_url: str):
+    """Save a single final_url to file immediately if it doesn't already exist."""
+    if not output_file or not final_url:
+        return
+    
+    # Normalize URL by removing trailing slash
+    normalized_url = final_url.rstrip("/")
+    if not normalized_url:
+        return
+    
+    try:
+        # Read existing URLs from file (if it exists)
+        existing_urls = set()
+        if os.path.exists(output_file):
+            try:
+                with open(output_file, "r") as f:
+                    for line in f:
+                        url = line.strip().rstrip("/")
+                        if url:
+                            existing_urls.add(url)
+            except Exception:
+                # If we can't read the file, continue anyway (will append)
+                pass
+        
+        # Check if URL already exists
+        if normalized_url in existing_urls:
+            return  # URL already exists, don't append
+        
+        # Append the new URL to the file
+        with open(output_file, "a") as f:
+            f.write(f"{normalized_url}\n")
+            f.flush()  # Ensure data is written immediately
+            try:
+                os.fsync(f.fileno())  # Force write to disk (if supported)
+            except (OSError, AttributeError):
+                # fsync not available or failed, flush() should be sufficient
+                pass
+    except Exception:
+        # Silently handle errors - don't crash the scan
+        pass
 
 
 def print_result(result: dict, verbose: bool = False):
@@ -567,9 +720,20 @@ Examples:
     )
 
     parser.add_argument(
+        "--final-urls-file",
+        help="File to save unique final_url values (one per line, appends to existing file)"
+    )
+
+    parser.add_argument(
         "--all-results",
         action="store_true",
         help="Save all results to output file, not just vulnerable hosts"
+    )
+
+    parser.add_argument(
+        "--no-resume",
+        action="store_true",
+        help="Disable resume functionality and start from scratch"
     )
 
     parser.add_argument(
@@ -666,9 +830,26 @@ Examples:
         print_banner()
 
     if args.url:
-        hosts = [args.url]
+        # Remove *. from the start if present
+        url = args.url
+        if url.startswith("*."):
+            url = url[2:]
+        hosts = [url]
+        resume_file = None
     else:
         hosts = load_hosts(args.list)
+        # Setup resume functionality (only for list file mode)
+        resume_file = None
+        if not args.no_resume:
+            resume_file = get_resume_file_path(args.list)
+            scanned_hosts = load_scanned_hosts(resume_file)
+            if scanned_hosts:
+                original_count = len(hosts)
+                # Filter out already-scanned hosts by normalizing and comparing
+                hosts = [h for h in hosts if normalize_host(h) not in scanned_hosts]
+                skipped_count = original_count - len(hosts)
+                if skipped_count > 0 and not args.quiet:
+                    print(colorize(f"[*] Resuming: {skipped_count} host(s) already scanned, {len(hosts)} remaining", Colors.CYAN))
 
     if not hosts:
         print(colorize("[ERROR] No hosts to scan", Colors.RED))
@@ -729,6 +910,12 @@ Examples:
             print_result(result, args.verbose)
         if result["vulnerable"]:
             vulnerable_count = 1
+            # Save URL incrementally if enabled
+            if args.final_urls_file and result.get("final_url"):
+                save_unique_url_incremental(args.final_urls_file, result["final_url"])
+        # Save to resume file if enabled
+        if resume_file:
+            save_scanned_host(resume_file, hosts[0])
     else:
         with ThreadPoolExecutor(max_workers=args.threads) as executor:
             futures = {
@@ -746,9 +933,16 @@ Examples:
                 for future in as_completed(futures):
                     result = future.result()
                     results.append(result)
+                    
+                    # Save to resume file if enabled
+                    if resume_file:
+                        save_scanned_host(resume_file, result["host"])
 
                     if result["vulnerable"]:
                         vulnerable_count += 1
+                        # Save URL incrementally if enabled
+                        if args.final_urls_file and result.get("final_url"):
+                            save_unique_url_incremental(args.final_urls_file, result["final_url"])
                         tqdm.write("")
                         print_result(result, args.verbose)
                     elif result["error"]:
@@ -780,6 +974,15 @@ Examples:
 
     if args.output:
         save_results(results, args.output, vulnerable_only=not args.all_results)
+
+    if args.final_urls_file:
+        save_unique_urls(results, args.final_urls_file, vulnerable_only=True)
+
+    # Clean up resume file after successful completion
+    if resume_file:
+        delete_resume_file(resume_file)
+        if not args.quiet:
+            print(colorize(f"[+] Resume file cleaned up", Colors.GREEN))
 
     if vulnerable_count > 0:
         sys.exit(1)
