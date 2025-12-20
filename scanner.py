@@ -906,13 +906,21 @@ Examples:
     if len(hosts) == 1:
         result = check_vulnerability(hosts[0], timeout, verify_ssl, custom_headers=custom_headers, safe_check=args.safe_check, windows=args.windows, waf_bypass=args.waf_bypass, waf_bypass_size_kb=args.waf_bypass_size, vercel_waf_bypass=args.vercel_waf_bypass, paths=paths)
         results.append(result)
-        if not args.quiet or result["vulnerable"]:
-            print_result(result, args.verbose)
         if result["vulnerable"]:
             vulnerable_count = 1
             # Save URL incrementally if enabled
             if args.final_urls_file and result.get("final_url"):
                 save_unique_url_incremental(args.final_urls_file, result["final_url"])
+                # Print only final_url when --final-urls-file is used
+                final_url = result.get("final_url", "").rstrip("/")
+                if final_url:
+                    print(final_url)
+            else:
+                # Print full result when --final-urls-file is not used
+                if not args.quiet or result["vulnerable"]:
+                    print_result(result, args.verbose)
+        elif not args.quiet:
+            print_result(result, args.verbose)
         # Save to resume file if enabled
         if resume_file:
             save_scanned_host(resume_file, hosts[0])
@@ -943,8 +951,14 @@ Examples:
                         # Save URL incrementally if enabled
                         if args.final_urls_file and result.get("final_url"):
                             save_unique_url_incremental(args.final_urls_file, result["final_url"])
-                        tqdm.write("")
-                        print_result(result, args.verbose)
+                            # Print only final_url when --final-urls-file is used
+                            final_url = result.get("final_url", "").rstrip("/")
+                            if final_url:
+                                tqdm.write(final_url)
+                        else:
+                            # Print full result when --final-urls-file is not used
+                            tqdm.write("")
+                            print_result(result, args.verbose)
                     elif result["error"]:
                         error_count += 1
                         if not args.quiet and args.verbose:
