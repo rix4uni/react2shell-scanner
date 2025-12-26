@@ -26,6 +26,27 @@ The `--vercel-waf-bypass` flag uses an alternative payload variant specifically 
 
 The `--windows` flag switches the payload from Unix shell (`echo $((41*271))`) to PowerShell (`powershell -c "41*271"`) for targets running on Windows.
 
+## Resume Functionality
+
+When scanning from a list file, the scanner automatically enables resume functionality. Progress is saved after each host is scanned to a resume file (`.resume` extension) in statistics format:
+
+```
+total=500000
+scanned=300000
+pending=200000
+```
+
+If a scan is interrupted (including via CTRL+C), you can resume by running the same command again. The scanner will automatically skip already-scanned hosts and continue from where it left off.
+
+The resume file is automatically cleaned up after successful completion. Use `--no-resume` to disable resume functionality and start from scratch.
+
+### Interrupt Handling
+
+The scanner responds immediately to CTRL+C on the first press:
+- Pending tasks are cancelled gracefully
+- Resume statistics are saved before exiting
+- A helpful message is shown indicating how to resume the scan
+
 ## Requirements
 
 - Python 3.9+
@@ -90,6 +111,24 @@ python3 scanner.py -u https://example.com --path /_next --path /api
 python3 scanner.py -u https://example.com --path-file paths.txt
 ```
 
+Save vulnerable URLs to a file (one per line):
+
+```
+python3 scanner.py -l hosts.txt --final-urls-file results.txt
+```
+
+When using `--final-urls-file`, terminal output shows only the final_url values (one per line) instead of full [VULNERABLE] messages. The progress bar stays at the bottom and updates in place.
+
+Resume a scan after interruption:
+
+```
+python3 scanner.py -l hosts.txt
+# Press CTRL+C to interrupt
+# Later, run the same command to resume from where you left off
+```
+
+The scanner automatically saves progress after each host is scanned. If interrupted, you can resume by running the same command again. Use `--no-resume` to start from scratch.
+
 ## Options
 
 ```
@@ -99,6 +138,8 @@ python3 scanner.py -u https://example.com --path-file paths.txt
 --timeout         Request timeout in seconds (default: 10)
 -o, --output      Output file for results (JSON)
 --all-results     Save all results, not just vulnerable hosts
+--final-urls-file File to save unique final_url values (one per line)
+--no-resume       Disable resume functionality and start from scratch
 -k, --insecure    Disable SSL certificate verification
 -H, --header      Custom header (can be used multiple times)
 -v, --verbose     Show response details for vulnerable hosts
@@ -108,6 +149,7 @@ python3 scanner.py -u https://example.com --path-file paths.txt
 --windows         Use Windows PowerShell payload instead of Unix shell
 --waf-bypass      Add junk data to bypass WAF content inspection
 --waf-bypass-size Size of junk data in KB (default: 128)
+--vercel-waf-bypass Use Vercel WAF bypass payload variant
 --path            Custom path to test (can be used multiple times)
 --path-file       File containing paths to test (one per line)
 ```
@@ -124,4 +166,26 @@ This tooling originally was built out as a safe way to detect the RCE. This func
 
 ## Output
 
-Results are printed to the terminal. When using `-o`, vulnerable hosts are saved to a JSON file containing the full HTTP request and response for verification.
+Results are printed to the terminal. By default, vulnerable hosts are displayed with `[VULNERABLE]` status messages. When using `--final-urls-file`, the output format changes to show only the final_url values (one per line) above a single progress bar that updates in place:
+
+```
+medisway.com
+media115.lanestel.fr
+maximaleinsatz.marketing
+maps.icgracia.org
+Scanning:  17%|█████▎                          | 5/30 [00:01<00:04,  6.10host/s]
+```
+
+When using `-o`, vulnerable hosts are saved to a JSON file containing the full HTTP request and response for verification.
+
+### Resume Files
+
+When scanning from a list file, progress is automatically saved to a resume file (same name as the input file with `.resume` extension). The resume file uses a statistics-based format:
+
+```
+total=500000
+scanned=300000
+pending=200000
+```
+
+To resume an interrupted scan, simply run the same command again. The scanner will automatically detect the resume file and continue from where it left off. The resume file is automatically deleted after successful completion.

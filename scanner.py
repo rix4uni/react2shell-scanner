@@ -480,41 +480,57 @@ def get_resume_file_path(hosts_file: str) -> str:
     return f"{hosts_file}.resume"
 
 
-def load_scanned_hosts(resume_file: str) -> set[str]:
-    """Load already-scanned hosts from resume file."""
-    scanned_hosts = set()
+def load_resume_stats(resume_file: str) -> Optional[Tuple[int, int, int]]:
+    """Load resume statistics from resume file.
+    
+    Returns a tuple (total, scanned, pending) or None if file doesn't exist or is invalid.
+    """
     if not resume_file or not os.path.exists(resume_file):
-        return scanned_hosts
+        return None
     
     try:
+        stats = {}
         with open(resume_file, "r") as f:
             for line in f:
-                host = line.strip()
-                if host:
-                    # Normalize the host before adding to set
-                    normalized = normalize_host(host)
-                    if normalized:
-                        scanned_hosts.add(normalized)
-    except Exception as e:
+                line = line.strip()
+                if line and "=" in line:
+                    key, value = line.split("=", 1)
+                    try:
+                        stats[key.strip()] = int(value.strip())
+                    except ValueError:
+                        continue
+        
+        if "total" in stats and "scanned" in stats and "pending" in stats:
+            return (stats["total"], stats["scanned"], stats["pending"])
+    except Exception:
         # Silently handle errors - if we can't read resume file, just start fresh
         pass
     
-    return scanned_hosts
+    return None
 
 
-def save_scanned_host(resume_file: str, host: str):
-    """Append a scanned host to the resume file."""
+def save_resume_stats(resume_file: str, total: int, scanned: int, pending: int):
+    """Save resume statistics to resume file.
+    
+    Overwrites the file with current statistics in format:
+    total=500000
+    scanned=300000
+    pending=200000
+    """
     if not resume_file:
         return
     
     try:
-        # Normalize host before saving
-        normalized = normalize_host(host)
-        if not normalized:
-            return
-        
-        with open(resume_file, "a") as f:
-            f.write(f"{normalized}\n")
+        with open(resume_file, "w") as f:
+            f.write(f"total={total}\n")
+            f.write(f"scanned={scanned}\n")
+            f.write(f"pending={pending}\n")
+            f.flush()
+            try:
+                os.fsync(f.fileno())  # Force write to disk (if supported)
+            except (OSError, AttributeError):
+                # fsync not available or failed, flush() should be sufficient
+                pass
     except Exception:
         # Silently handle errors - resume is a convenience feature
         pass
@@ -829,27 +845,37 @@ Examples:
     if not args.quiet:
         print_banner()
 
+    total_hosts = 0  # Initialize for single URL case
+    scanned_count_start = 0  # Track how many were already scanned
     if args.url:
         # Remove *. from the start if present
         url = args.url
         if url.startswith("*."):
             url = url[2:]
         hosts = [url]
+        total_hosts = 1
         resume_file = None
     else:
         hosts = load_hosts(args.list)
+        total_hosts = len(hosts)  # Store total before any skipping
         # Setup resume functionality (only for list file mode)
         resume_file = None
         if not args.no_resume:
             resume_file = get_resume_file_path(args.list)
-            scanned_hosts = load_scanned_hosts(resume_file)
-            if scanned_hosts:
-                original_count = len(hosts)
-                # Filter out already-scanned hosts by normalizing and comparing
-                hosts = [h for h in hosts if normalize_host(h) not in scanned_hosts]
-                skipped_count = original_count - len(hosts)
-                if skipped_count > 0 and not args.quiet:
-                    print(colorize(f"[*] Resuming: {skipped_count} host(s) already scanned, {len(hosts)} remaining", Colors.CYAN))
+            resume_stats = load_resume_stats(resume_file)
+            if resume_stats:
+                total_from_file, scanned_from_file, pending_from_file = resume_stats
+                scanned_count_start = scanned_from_file
+                # Skip the first N hosts that were already scanned
+                skip_count = scanned_from_file
+                if skip_count > 0 and skip_count < total_hosts:
+                    hosts = hosts[skip_count:]
+                    if not args.quiet:
+                        print(colorize(f"[*] Resuming: total={total_hosts}, scanned={scanned_from_file}, pending={len(hosts)}", Colors.CYAN))
+                elif skip_count >= total_hosts:
+                    # All hosts were already scanned
+                    if not args.quiet:
+                        print(colorize(f"[*] All {total_hosts} host(s) already scanned", Colors.CYAN))
 
     if not hosts:
         print(colorize("[ERROR] No hosts to scan", Colors.RED))
@@ -904,71 +930,109 @@ Examples:
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
     if len(hosts) == 1:
-        result = check_vulnerability(hosts[0], timeout, verify_ssl, custom_headers=custom_headers, safe_check=args.safe_check, windows=args.windows, waf_bypass=args.waf_bypass, waf_bypass_size_kb=args.waf_bypass_size, vercel_waf_bypass=args.vercel_waf_bypass, paths=paths)
-        results.append(result)
-        if result["vulnerable"]:
-            vulnerable_count = 1
-            # Save URL incrementally if enabled
-            if args.final_urls_file and result.get("final_url"):
-                save_unique_url_incremental(args.final_urls_file, result["final_url"])
-                # Print only final_url when --final-urls-file is used
-                final_url = result.get("final_url", "").rstrip("/")
-                if final_url:
-                    print(final_url)
-            else:
-                # Print full result when --final-urls-file is not used
-                if not args.quiet or result["vulnerable"]:
-                    print_result(result, args.verbose)
-        elif not args.quiet:
-            print_result(result, args.verbose)
-        # Save to resume file if enabled
-        if resume_file:
-            save_scanned_host(resume_file, hosts[0])
-    else:
-        with ThreadPoolExecutor(max_workers=args.threads) as executor:
-            futures = {
-                executor.submit(check_vulnerability, host, timeout, verify_ssl, custom_headers=custom_headers, safe_check=args.safe_check, windows=args.windows, waf_bypass=args.waf_bypass, waf_bypass_size_kb=args.waf_bypass_size, vercel_waf_bypass=args.vercel_waf_bypass, paths=paths): host
-                for host in hosts
-            }
-
-            with tqdm(
-                total=len(hosts),
-                desc=colorize("Scanning", Colors.CYAN),
-                unit="host",
-                ncols=80,
-                disable=args.quiet
-            ) as pbar:
-                for future in as_completed(futures):
-                    result = future.result()
-                    results.append(result)
-                    
-                    # Save to resume file if enabled
-                    if resume_file:
-                        save_scanned_host(resume_file, result["host"])
-
-                    if result["vulnerable"]:
-                        vulnerable_count += 1
-                        # Save URL incrementally if enabled
-                        if args.final_urls_file and result.get("final_url"):
-                            save_unique_url_incremental(args.final_urls_file, result["final_url"])
-                            # Print only final_url when --final-urls-file is used
-                            final_url = result.get("final_url", "").rstrip("/")
-                            if final_url:
-                                tqdm.write(final_url)
-                        else:
-                            # Print full result when --final-urls-file is not used
-                            tqdm.write("")
-                            print_result(result, args.verbose)
-                    elif result["error"]:
-                        error_count += 1
-                        if not args.quiet and args.verbose:
-                            tqdm.write("")
-                            print_result(result, args.verbose)
-                    elif not args.quiet and args.verbose:
-                        tqdm.write("")
+        try:
+            result = check_vulnerability(hosts[0], timeout, verify_ssl, custom_headers=custom_headers, safe_check=args.safe_check, windows=args.windows, waf_bypass=args.waf_bypass, waf_bypass_size_kb=args.waf_bypass_size, vercel_waf_bypass=args.vercel_waf_bypass, paths=paths)
+            results.append(result)
+            if result["vulnerable"]:
+                vulnerable_count = 1
+                # Save URL incrementally if enabled
+                if args.final_urls_file and result.get("final_url"):
+                    save_unique_url_incremental(args.final_urls_file, result["final_url"])
+                    # Print only final_url when --final-urls-file is used
+                    final_url = result.get("final_url", "").rstrip("/")
+                    if final_url:
+                        print(final_url)
+                else:
+                    # Print full result when --final-urls-file is not used
+                    if not args.quiet or result["vulnerable"]:
                         print_result(result, args.verbose)
+            elif not args.quiet:
+                print_result(result, args.verbose)
+            # Save to resume file if enabled
+            if resume_file:
+                scanned_count = scanned_count_start + 1
+                pending_count = total_hosts - scanned_count
+                save_resume_stats(resume_file, total_hosts, scanned_count, pending_count)
+        except KeyboardInterrupt:
+            # Save resume statistics before exiting
+            if resume_file:
+                scanned_count = scanned_count_start
+                pending_count = total_hosts - scanned_count
+                save_resume_stats(resume_file, total_hosts, scanned_count, pending_count)
+            if not args.quiet:
+                print()
+                print(colorize("\n[!] Interrupted by user (CTRL+C)", Colors.YELLOW))
+                if resume_file:
+                    print(colorize(f"[*] Progress saved. Resume with: {args.list}", Colors.CYAN))
+            sys.exit(130)  # Standard exit code for SIGINT/CTRL+C
+    else:
+        try:
+            with ThreadPoolExecutor(max_workers=args.threads) as executor:
+                futures = {
+                    executor.submit(check_vulnerability, host, timeout, verify_ssl, custom_headers=custom_headers, safe_check=args.safe_check, windows=args.windows, waf_bypass=args.waf_bypass, waf_bypass_size_kb=args.waf_bypass_size, vercel_waf_bypass=args.vercel_waf_bypass, paths=paths): host
+                    for host in hosts
+                }
 
-                    pbar.update(1)
+                scanned_count = scanned_count_start  # Initialize with already-scanned count
+                with tqdm(
+                    total=len(hosts),
+                    desc=colorize("Scanning", Colors.CYAN),
+                    unit="host",
+                    ncols=80,
+                    disable=args.quiet
+                ) as pbar:
+                    for future in as_completed(futures):
+                        result = future.result()
+                        results.append(result)
+                        
+                        # Update and save resume statistics if enabled
+                        if resume_file:
+                            scanned_count += 1
+                            pending_count = total_hosts - scanned_count
+                            save_resume_stats(resume_file, total_hosts, scanned_count, pending_count)
+
+                        if result["vulnerable"]:
+                            vulnerable_count += 1
+                            # Save URL incrementally if enabled
+                            if args.final_urls_file and result.get("final_url"):
+                                save_unique_url_incremental(args.final_urls_file, result["final_url"])
+                                # Print only final_url when --final-urls-file is used
+                                final_url = result.get("final_url", "").rstrip("/")
+                                if final_url:
+                                    tqdm.write(final_url)
+                            else:
+                                # Print full result when --final-urls-file is not used
+                                tqdm.write("")
+                                print_result(result, args.verbose)
+                        elif result["error"]:
+                            error_count += 1
+                            if not args.quiet and args.verbose:
+                                tqdm.write("")
+                                print_result(result, args.verbose)
+                        elif not args.quiet and args.verbose:
+                            tqdm.write("")
+                            print_result(result, args.verbose)
+
+                        pbar.update(1)
+        except KeyboardInterrupt:
+            # Cancel all pending futures
+            for future in futures:
+                future.cancel()
+            # Shutdown executor immediately without waiting
+            executor.shutdown(wait=False)
+            # Save resume statistics before exiting
+            if resume_file:
+                # Calculate current scanned count (some futures may have completed)
+                completed_count = len(results)
+                scanned_count = scanned_count_start + completed_count
+                pending_count = total_hosts - scanned_count
+                save_resume_stats(resume_file, total_hosts, scanned_count, pending_count)
+            if not args.quiet:
+                print()
+                print(colorize("\n[!] Interrupted by user (CTRL+C)", Colors.YELLOW))
+                if resume_file:
+                    print(colorize(f"[*] Progress saved. Resume with: {args.list}", Colors.CYAN))
+            sys.exit(130)  # Standard exit code for SIGINT/CTRL+C
 
     if not args.quiet:
         print()
